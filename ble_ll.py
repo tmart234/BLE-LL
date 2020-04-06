@@ -29,22 +29,30 @@ class LinkLayer:
         iso_broadcasting = 6
 
     def __init__(self):
-        # Default master address
         self.mac_address = '80:ea:ca:80:00:01'
-        self.master_address = '5d:36:ac:90:0b:22'
         # Internal vars
-        self.none_count = 0
-        self.end_connection = False
         self.state = StateMachine['standby']
-        self.ll_role = None
-        self.slave_addr_type = 0
-        self.switch_length_pkt = 0
 
         self.driver = Driver()
         self._pkt = None
         self.channel = None
         self.response = None
         self.scan_timer = None
+        # advertising channel
+        self.pdu_ac_payload_size_max = 37
+        self.pdu_ll_hdr_size = 2
+        self.pdu_ac_size_max = self.pdu_ac_payload_size_max + self.pdu_ll_hdr_size
+        self.pdu_ac_access_addr = 0x8e89bed6
+        # data channel
+        self.pdu_dc_payload_size_min = 27
+        self.pdu_dc_payload_time_min = 328
+        self.pdu_ac_size_min = self.pdu_dc_payload_size_min + self.pdu_ll_hdr_size
+        self.conn_access_addr = 0xe213bc42
+        # size and time vars for DLE
+        self.max_tx_bytes = 251
+        self.max_rx_bytes = 251
+        self.max_tx_time = 2120
+        self.max_rx_time = 2120
 
     # for sending raw ll packets
     # useage: send_raw_ll(BTLE() / BTLE_ADV() / BTLE_SCAN_REQ() / data)
@@ -59,54 +67,61 @@ class LinkLayer:
                 time.sleep(0.1)
         driver.raw_ll(body)
 
-    # process ll packet
+        # process ll packet
+
     def process_ll(self, data):
         if data is None:
             return
-        elif L2CAP_Hdr() in data:
-            BTLE.decode_payload_as(data, L2CAP_Hdr())
-            core.process_l2cap(body)        # have blesuite core process
         else:
             self.response = BTLE(data)
             if self.response is None:
                 print('recieved packet is NONE')
-            elif BTLE_DATA in self.response and self.state.name is 'initiating':
-                self.state.name = 'connected'
-                print('Connected (L2Cap channel established)')
-                # Send version indication request
-                self._pkt = BTLE(access_addr=access_address) / BTLE_DATA() / CtrlPDU() / LL_VERSION_IND(version='5.0')
-                driver.send(pkt)
                 return
-            elif BTLE_DATA in self.response and self.state.name is 'connected':
-                self.state.name = 'connected'
-                print('Recv data pkt {}'.format(self.response))
-                # pass to HCI layer
-                return
-            elif BTLE_ADV in self.response and self.state.name is 'scanning':
-                # adv_ind recvd
-                if BTLE_ADV_IND in self.response:
-                    # deal with adv here, get dev_local/complete_name?
-                    pass
-
-            elif BTLE_ADV in self.response and self.state.name is 'initiating':
-                # scan response recvd
-                if BTLE_SCAN_RSP in self.response and self.response.AdvA == mac_address.lower():
-                    #  Send connection request back to advertiser
-                    conn_request = BTLE_ADV(RxAdd=self.response.TxAdd, TxAdd=0) / BTLE_CONNECT_REQ(
-                        InitA=master_address,
-                        AdvA=mac_address,  # TODO: check values!! from sweyntooth repo
-                        AA=access_address,  # Access address (any)
-                        crc_init=0x179a9c,  # CRC init (any)
-                        win_size=2,  # 2.5 of windows size (anchor connection window size)
-                        win_offset=1,  # 1.25ms windows offset (anchor connection point)
-                        interval=16,  # 20ms connection interval
-                        latency=0,  # Slave latency (any)
-                        timeout=50,  # Supervision timeout, 500ms (any)
-                        chM=0x1FFFFFFFFF,  # Any
-                        hop=5,  # Hop increment (any)
-                        SCA=0,  # Clock tolerance
-                    )
-                    self.driver.raw_ll(conn_request)
+            elif BTLE_DATA in self.response:
+                if self.state.name is 'initiating':
+                    self.state.name = 'connected'
+                    print('Connected (L2Cap channel established)')
+                    # Send version indication request
+                    self._pkt = BTLE(access_addr=access_address) / BTLE_DATA() / CtrlPDU() / LL_VERSION_IND(
+                        version='5.0')
+                    driver.send(pkt)
+                    return
+                elif self.state.name is 'connected':
+                    print('Recv data pkt {}'.format(self.response))
+                    if L2CAP_Hdr() in self.response:
+                        BTLE_DATA(self.response)
+                        core.process_l2cap(body)  # have blesuite core process
+                        # pass to HCI layer?
+                        return
+                    elif CtrlPDU in self.response:
+                        if LL_LENGTH_REQ in response:
+                            set_dle()   # TODO: compare dle here
+                            send_ll_len_response() # TODO
+            elif BTLE_ADV in self.response:
+                if self.state.name is 'scanning':
+                    if BTLE_ADV_IND in self.response:
+                        # adv_ind recvd
+                        # deal with adv here, get dev_local/complete_name?
+                        return
+                elif self.state.name is 'initiating':
+                    # scan response recvd
+                    if BTLE_SCAN_RSP in self.response and self.response.AdvA == mac_address.lower():
+                        #  Send connection request back to advertiser
+                        conn_request = BTLE_ADV(RxAdd=self.response.TxAdd, TxAdd=0) / BTLE_CONNECT_REQ(
+                            InitA=self.master_address,
+                            AdvA=self.mac_address,  # TODO: check values!! from sweyntooth repo
+                            AA=self.pdu_ac_access_addr,
+                            crc_init=0x179a9c,  # CRC init (any)
+                            win_size=2,  # 2.5 of windows size (anchor connection window size)
+                            win_offset=1,  # 1.25ms windows offset (anchor connection point)
+                            interval=16,  # 20ms connection interval
+                            latency=0,  # Slave latency (any)
+                            timeout=50,  # Supervision timeout, 500ms (any)
+                            chM=0x1FFFFFFFFF,  # Any
+                            hop=5,  # Hop increment (any)
+                            SCA=0,  # Clock tolerance
+                        )
+                        self.driver.raw_ll(conn_request)
 
     # look up rf center freq for channel
     def rf_lookup_feq(self):
@@ -135,7 +150,7 @@ class LinkLayer:
     # Flow chart in BLE core spec Version 5.2 | Vol 6, Part D page 3120
     def ll_scan_timeout(self):
         if self.state.name is 'standby':
-            self.ll_set_scan_prams(le_scan_interval=123, le_scan_window=123)
+            self.ll_set_scan_prams(le_scan_interval=0x0010, le_scan_window=0x0010)
             # TODO: add command complete to upper HCI levels
             self.ll_set_scan_enable(True, None)
             # set scan timer
@@ -153,6 +168,14 @@ class LinkLayer:
                     # search for dev_local_name here?
                     print(advertiser_address.upper() + ': ' + pkt.summary()[7:] + ' Detected')
         # pass HCI scan timeout event?
+
+    def len_req(self):
+        pkt = BTLE() / CtrlPDU() / LL_LENGTH_REQ(max_tx_bytes = self.max_tx_bytes,
+                                                 max_rx_bytes = self.max_rx_bytes,
+                                                 max_rx_time = self.max_rx_time,
+                                                max_tx_time = self.max_tx_time)
+        self.driver.send(pkt)
+        # compare fields and choose lowest values
 
     # only one advertising channel is being looked at during each scanInterval
     # le_scan_interval = le_scan_window is continuous scanning
