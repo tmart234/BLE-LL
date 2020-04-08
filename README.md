@@ -1,10 +1,13 @@
 # BLE-LL
 
-# Project Notice
+# Notice
 As of now, this repo is extremely incomplete. Please use for inspiration only. Accepting PRs!
 
 # Objective
-To merge a repo like BLESuite (https://github.com/nccgroup/BLESuite hackable python BLE stack) with scapy-radio (https://github.com/BastilleResearch/scapy-radio BLE PHY packets over SDR) so we can send or receive valid or malformed Bluetooth LE packets on any layer.
+To build a custom python BLE Link Layer, a gnuradio link connection manager for hard timings, and an HCI parser. Ideally will use scapy-radio (https://github.com/BastilleResearch/scapy-radio BLE PHY packets w/ Scapy over SDR). Once developed, we will merge BLESuite (https://github.com/nccgroup/BLESuite hackable python Scapy BLE stack, w/ all host layers) and pass those HCI commands to our parser which will take care of the rest.
+
+TL;DR:
+Send/receive valid/malformed Bluetooth LE packets on any host/controller layer using an ACL (async) data connection.
 
 # Requirements
 - BLESuite
