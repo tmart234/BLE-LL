@@ -1,17 +1,14 @@
-from scapy.layers.bluetooth4LE import *
-from scapy.layers.bluetooth import *
-
-from blesuite.pybt.stack import *
-from blesuite.pybt.stack import *
-
-import sys
+import diver
 import os
+import sys
+import util
+from blesuite.pybt.stack import *
+from blesuite.pybt.stack import *
 from enum import Enum
-
+from scapy.layers.bluetooth import *
+from scapy.layers.bluetooth4LE import *
 from threading import Timer
 
-import util
-import diver
 
 # rewrite BLESuite stack.py to not use sockets but rather a "fake socket" class to send pkts/commands?
 # write an "HCI parser" that returns event codes.... oh boy this sounds fun
@@ -19,7 +16,7 @@ import diver
 
 class LinkLayer:
     # LL states
-    class StateMachine(Enum):
+    class State(Enum):
         standby = 0
         advertising = 1
         scanning = 2
@@ -30,11 +27,12 @@ class LinkLayer:
 
     def __init__(self):
         self.mac_address = '80:ea:ca:80:00:01'
+        self.slave_addr_type = None
         # Internal vars
-        self.state = StateMachine['standby']
+        self.state = State['standby']
 
         self.driver = Driver()
-        self._pkt = None
+        self.pkt = None
         self.channel = None
         self.response = None
         self.scan_timer = None
@@ -67,74 +65,86 @@ class LinkLayer:
                 time.sleep(0.1)
         driver.raw_ll(body)
 
-        # process ll packet
-
+    # main function for processing ll packets
     def process_ll(self, data):
-        if data is None:
+        self.response = BTLE(data)
+        if data or self.response is None:
+            print('Recieved NONE packet')
             return
         else:
-            self.response = BTLE(data)
-            if self.response is None:
-                print('recieved packet is NONE')
-                return
-            elif BTLE_DATA in self.response:
-                if self.state.name is 'initiating':
-                    self.state.name = 'connected'
-                    print('Connected (L2Cap channel established)')
-                    # Send version indication request
-                    self._pkt = BTLE(access_addr=access_address) / BTLE_DATA() / CtrlPDU() / LL_VERSION_IND(
-                        version='5.0')
-                    driver.send(pkt)
-                    return
-                elif self.state.name is 'connected':
-                    print('Recv data pkt {}'.format(self.response))
-                    if L2CAP_Hdr() in self.response:
-                        BTLE_DATA(self.response)
-                        core.process_l2cap(body)  # have blesuite core process
-                        # pass to HCI layer?
-                        return
-                    elif CtrlPDU in self.response:
-                        if LL_LENGTH_REQ in response:
-                            set_dle()   # TODO: compare dle here
-                            send_ll_len_response() # TODO
+            if BTLE_DATA in self.response:
+                process_ll_data(self.response)
             elif BTLE_ADV in self.response:
-                if self.state.name is 'scanning':
-                    if BTLE_ADV_IND in self.response:
-                        # adv_ind recvd
-                        # deal with adv here, get dev_local/complete_name?
-                        return
-                elif self.state.name is 'initiating':
-                    # scan response recvd
-                    if BTLE_SCAN_RSP in self.response and self.response.AdvA == mac_address.lower():
-                        #  Send connection request back to advertiser
-                        conn_request = BTLE_ADV(RxAdd=self.response.TxAdd, TxAdd=0) / BTLE_CONNECT_REQ(
-                            InitA=self.master_address,
-                            AdvA=self.mac_address,  # TODO: check values!! from sweyntooth repo
-                            AA=self.pdu_ac_access_addr,
-                            crc_init=0x179a9c,  # CRC init (any)
-                            win_size=2,  # 2.5 of windows size (anchor connection window size)
-                            win_offset=1,  # 1.25ms windows offset (anchor connection point)
-                            interval=16,  # 20ms connection interval
-                            latency=0,  # Slave latency (any)
-                            timeout=50,  # Supervision timeout, 500ms (any)
-                            chM=0x1FFFFFFFFF,  # Any
-                            hop=5,  # Hop increment (any)
-                            SCA=0,  # Clock tolerance
-                        )
-                        self.driver.raw_ll(conn_request)
+                process_ll_adv(self.response)
+            else:
+                print('Recieved unknown LL packet')
+                return None
+
+    def process_ll_data(self):
+        if self.state.name is 'initiating':
+            # probably first time we recv data, set state to connected
+            self.state.name = 'connected'
+            print('Connected (L2Cap channel established)')
+            # Send version indication request
+            self.pkt = BTLE(access_addr=self.access_address) / BTLE_DATA() / CtrlPDU() / LL_VERSION_IND(
+                version='5.0')
+            self.send_raw_ll(self.pkt)
+            return
+        elif self.state.name is 'connected':
+            print('Recv data pkt {}'.format(self.response))
+            if L2CAP_Hdr() in self.response:
+                BTLE_DATA(self.response)
+                core.process_l2cap(body)  # have blesuite core process
+                # pass to HCI layer?
+                return
+            elif CtrlPDU in self.response:
+                if LL_LENGTH_REQ in response:
+                    self.set_dle()   # TODO: compare dle here
+                    self.send_ll_len_response()  # TODO
+
+    def process_ll_adv(self):
+        if self.state.name is 'scanning':
+            if BTLE_ADV_IND in self.response:
+                # adv_ind recvd
+                # deal with adv here, get dev_local/complete_name?
+                return
+        elif self.state.name is 'initiating':
+            # scan response recvd
+            if BTLE_SCAN_RSP in self.response and self.response.AdvA == self.mac_address.lower():
+                #  Send connection request back to advertiser
+                conn_request = BTLE_ADV(RxAdd=self.response.TxAdd, TxAdd=0) / BTLE_CONNECT_REQ(
+                    InitA=self.master_address,
+                    AdvA=self.mac_address,  # TODO: check values!! from sweyntooth repo
+                    AA=self.pdu_ac_access_addr,
+                    crc_init=0x179a9c,  # CRC init (any)
+                    win_size=2,  # 2.5 of windows size (anchor connection window size)
+                    win_offset=1,  # 1.25ms windows offset (anchor connection point)
+                    interval=16,  # 20ms connection interval
+                    latency=0,  # Slave latency (any)
+                    timeout=50,  # Supervision timeout, 500ms (any)
+                    chM=0x1FFFFFFFFF,  # Any
+                    hop=5,  # Hop increment (any)
+                    SCA=0,  # Clock tolerance
+                )
+                self.send_raw_ll(conn_request)
 
     # look up rf center freq for channel
-    def rf_lookup_feq(self):
-        if self.chan <= 10:
-            return 4 + 2 * self.chan
+    def rf_set_feq(self):
+        if 0 <= self.chan <= 10:
+            ch = 4 + 2 * self.chan
         elif self.chan <= 36:
-            return 6 + 2 * self.chan
+            ch = 6 + 2 * self.chan
+        # advertising channels
         elif self.chan == 37:
-            return 2
+            ch = 2
         elif self.chan == 38:
-            return 26
+            ch = 26
+        elif self.chan == 39:
+            ch = 80
         else:
-            return 80
+            print('Error: Bad channel')
+            return None
+        return 2400 + ch
 
         # def scan_timeout(self, timeout):
         #     if self.state.name is not 'connected':
@@ -161,20 +171,20 @@ class LinkLayer:
             self.channel = (os.random() % 3) + 37
             while self.scan_timer:
                 # Check if packet from advertised is received
-                if self._pkt and BTLE_ADV in pkt and pkt.AdvA == advertiser_address.lower() and \
+                if self._pkt and BTLE_ADV in pkt and pkt.AdvA == self.advertiser_address.lower() and \
                         self.state.name is not 'connected':
                     self.scan_timer.disable_timeout('scan_timer')
-                    self.slave_addr_type = pkt.TxAdd
+                    self.slave_addr_type = self.pkt.TxAdd
                     # search for dev_local_name here?
-                    print(advertiser_address.upper() + ': ' + pkt.summary()[7:] + ' Detected')
+                    print(self.advertiser_address.upper() + ': ' + pkt.summary()[7:] + ' Detected')
         # pass HCI scan timeout event?
 
     def len_req(self):
         pkt = BTLE() / CtrlPDU() / LL_LENGTH_REQ(max_tx_bytes = self.max_tx_bytes,
                                                  max_rx_bytes = self.max_rx_bytes,
                                                  max_rx_time = self.max_rx_time,
-                                                max_tx_time = self.max_tx_time)
-        self.driver.send(pkt)
+                                                 max_tx_time = self.max_tx_time)
+        self.send_raw_ll(pkt)
         # compare fields and choose lowest values
 
     # only one advertising channel is being looked at during each scanInterval
@@ -187,9 +197,9 @@ class LinkLayer:
         self.scan_type = le_scan_type # passive scan
         self.scan_filter_policy = scanning_filter_policy # grab everything advertising
         print('LE scan  prams: scan type {}, address type {}, '.format(self.ll_scan_interval_ms,
-                                                                    self.ll_scan_window_ms))
+                                                                       self.ll_scan_window_ms))
         print('LE scan timing prams: window {}ms, interval {}'.format(self.ll_scan_interval_ms,
-                                                                    self.ll_scan_window_ms))
+                                                                      self.ll_scan_window_ms))
 
     def ll_set_scan_enable(self, le_scan_enable, filter_duplicates):
         if le_scan_enable:
@@ -202,7 +212,7 @@ class LinkLayer:
             print('LL needs to be in standby')
             return
         print('Starting scan')
-        self.state = StateMachine['scanning']
+        self.state = State['scanning']
         # set events?
         print('LE Scan Channel: {}'.format(self.channel))
         # recv() here
@@ -217,10 +227,10 @@ class LinkLayer:
 
     def send_scan_req(self):
         # Send scan request
-        _pkt = BTLE() / BTLE_ADV(RxAdd=self.slave_addr_type) / BTLE_SCAN_REQ(
+        self.pkt = BTLE() / BTLE_ADV(RxAdd=self.slave_addr_type) / BTLE_SCAN_REQ(
             ScanA=self.master_address,
             AdvA=self.mac_address)
-        driver.send(self._pkt)
+        self.send_raw_ll(self.pkt)
 
     #  Apple recommended peripheral advertising intervals are 152.5, 211.25, 318.75,
     #  417.5, 546.25, 760, 852.5, 1022.5, 1285 ms
